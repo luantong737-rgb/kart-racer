@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>3D 卡丁车（简易原型）</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0e12;color:#e8f0f7;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans SC","PingFang SC","Hiragino Sans GB",Arial,sans-serif}
+  #hud{position:fixed;left:12px;top:12px;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.35);backdrop-filter:blur(4px);font-size:14px}
+  #help{position:fixed;right:12px;top:12px;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.35)}
+  .tag{display:inline-block;border:1px solid #2a3b5c;border-radius:999px;padding:2px 8px;margin-left:6px;font-size:12px;color:#9bd6ff}
+  a{color:#9bd6ff}
+</style>
+<body>
+<div id="hud">速度 <span id="v">0</span> m/s<br>圈数 <span id="lap">0</span><span class="tag">起点在白线</span><br>本圈 <span id="lapTime">0.00</span>s　最佳 <span id="best">—</span></div>
+<div id="help">W/S 加速刹车　A/D 转向　空格手刹<br>R 重置位置　P 暂停</div>
+
+<script type="module">
+import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+import { OrbitControls } from "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x10141b);
+
+// 环境光与平行光
+scene.add(new THREE.HemisphereLight(0x91a7ff, 0x1b2a1f, 0.8));
+const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+sun.position.set(100,120,80);
+sun.castShadow = true;
+scene.add(sun);
+
+// 地面/赛道底
+const groundGeo = new THREE.PlaneGeometry(1000,1000);
+const groundMat = new THREE.MeshStandardMaterial({color:0x1a222a, roughness:1, metalness:0});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// 画赛道（用浅灰色面+白线起点）
+const track = new THREE.Mesh(
+  new THREE.RingGeometry(70,120,64,1,0,Math.PI*2),
+  new THREE.MeshStandardMaterial({color:0x2a343f, side:THREE.DoubleSide})
+);
+track.rotation.x = -Math.PI/2;
+scene.add(track);
+
+// 起点白线
+const startLine = new THREE.Mesh(new THREE.BoxGeometry(4,0.2,16),
+  new THREE.MeshStandardMaterial({color:0xffffff}));
+startLine.position.set(0,0.11, -95);
+scene.add(startLine);
+
+// 围墙（若干段 Box）
+const walls = new THREE.Group();
+function addWall(x,z,w,d,rot=0){
+  const m = new THREE.Mesh(
+    new THREE.BoxGeometry(w, 4, d),
+    new THREE.MeshStandardMaterial({color:0x37485a})
+  );
+  m.position.set(x,2,z);
+  m.rotation.y = rot;
+  m.castShadow = true; m.receiveShadow = true;
+  walls.add(m);
+}
+// 用一个“椭圆跑道”+ 内外墙
+for(let i=0;i<64;i++){
+  const t = i/64 * Math.PI*2;
+  const R1 = 120, R2 = 70;
+  const x1 = Math.cos(t)*R1, z1 = Math.sin(t)*R1;
+  const x2 = Math.cos(t)*R2, z2 = Math.sin(t)*R2;
+  const seg = 2.8;
+  const ang = Math.atan2(Math.sin(t), Math.cos(t));
+  addWall(x1,z1, seg, 6, ang);
+  addWall(x2,z2, seg, 6, ang);
+}
+scene.add(walls);
+
+// 卡丁车（底盘+四轮）
+const car = new THREE.Group();
+const body = new THREE.Mesh(
+  new THREE.BoxGeometry(4,1,6),
+  new THREE.MeshStandardMaterial({color:0x40d2a8, metalness:.1, roughness:.7})
+);
+body.position.y = 1.2; body.castShadow = true; car.add(body);
+
+function wheel(x,z){
+  const w = new THREE.Mesh(new THREE.CylinderGeometry(0.8,0.8,0.6,20),
+    new THREE.MeshStandardMaterial({color:0x222}));
+  w.rotation.z = Math.PI/2; w.position.set(x,0.6,z); w.castShadow = true;
+  return w;
+}
+car.add(wheel( 1.6, 2.1));
+car.add(wheel(-1.6, 2.1));
+car.add(wheel( 1.6,-2.1));
+car.add(wheel(-1.6,-2.1));
+
+scene.add(car);
+
+// 初始位置在起点附近
+car.position.set(0,0.6,-105);
+car.rotation.y = 0;
+
+// 摄像机 & 跟随
+const camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.1, 1000);
+camera.position.set(0,5,-10);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+// 可切换到观察模式（鼠标）
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enabled = false; // 默认关闭
+
+// 简易车辆物理（向前速度、横向漂移、转向角）
+let vel = 0;            // 前进速度 m/s
+let sideVel = 0;        // 侧滑速度
+let steer = 0;          // 当前方向（车头朝向，弧度）
+let steerInput = 0;     // 转向输入（-1~1）
+let accelInput = 0;     // 油门/刹车（-1~1）
+let handbrake = false;
+let paused = false;
+
+// UI
+const vEl = document.getElementById('v');
+const lapEl = document.getElementById('lap');
+const lapTimeEl = document.getElementById('lapTime');
+const bestEl = document.getElementById('best');
+let laps = 0, lapStart = performance.now()/1000, best = null;
+let crossed = false; // 防止反复触发计圈
+
+// 键盘控制
+const keys = {};
+addEventListener('keydown', e=>{ keys[e.code]=true; if(e.code==='KeyP') paused=!paused; if(e.code==='KeyR') resetCar(); });
+addEventListener('keyup',   e=>{ keys[e.code]=false; });
+
+function resetCar(){
+  car.position.set(0,0.6,-105);
+  vel=0; sideVel=0; steer=0; car.rotation.y=0;
+}
+
+function handleInput(dt){
+  accelInput = (keys['KeyW']||keys['ArrowUp'] ? 1:0) + (keys['KeyS']||keys['ArrowDown'] ? -1:0);
+  steerInput = (keys['KeyA']||keys['ArrowLeft'] ? 1:0) + (keys['KeyD']||keys['ArrowRight'] ? -1:0); // 左正
+  handbrake = !!keys['Space'];
+
+  // 加速/刹车
+  const acc = 18;             // 加速度
+  const brake = 28;
+  const maxV = 42;
+  if(accelInput>0) vel += acc*dt*accelInput;
+  else if(accelInput<0) vel += brake*dt*accelInput; // 倒退
+  // 空气/滚阻
+  const drag = 0.994;
+  vel *= (handbrake? 0.985: drag);
+  // 限速
+  vel = Math.max(Math.min(vel, maxV), -12);
+
+  // 转向（速度越快转向越小）
+  const maxSteer = 1.3; // 最大横摆角速度
+  const steerFactor =  Math.max(0.2, 1.0 - Math.abs(vel)/50);
+  steer += (-steerInput) * maxSteer * steerFactor * dt; // 左键A为正，车体需要负号
+  car.rotation.y = steer;
+
+  // 侧滑：随速度产生，手刹会放大
+  sideVel += (-steerInput) * Math.abs(vel)*0.06 * (handbrake? 1.8:0.8) * dt;
+  sideVel *= (handbrake? 0.92 : 0.94); // 摩擦
+
+  // 根据车体方向分解速度
+  const forward = new THREE.Vector3(Math.sin(steer),0, Math.cos(steer));
+  const right   = new THREE.Vector3(Math.cos(steer),0,-Math.sin(steer));
+  const move = new THREE.Vector3().addScaledVector(forward, vel*dt).addScaledVector(right, sideVel*dt);
+
+  car.position.add(move);
+
+  // 碰撞检测（AABB 与墙）
+  const carBox = new THREE.Box3().setFromObject(body).expandByScalar(-0.2);
+  for(const w of walls.children){
+    const box = new THREE.Box3().setFromObject(w);
+    if(box.intersectsBox(carBox)){
+      // 简单反弹：把车推离墙，速度损失
+      const normal = new THREE.Vector3().subVectors(car.position, w.position).setY(0).normalize();
+      car.position.addScaledVector(normal, 0.6);
+      vel *= 0.5; sideVel *= -0.3;
+      break;
+    }
+  }
+
+  // 计圈（穿过白线且车头朝向大致向前）
+  const distToLine = car.position.distanceTo(new THREE.Vector3(0,0.6,-95));
+  if(distToLine<6 && vel>6 && !crossed){
+    crossed = true;
+    const now = performance.now()/1000;
+    const lapTime = now - lapStart;
+    lapStart = now;
+    laps++;
+    lapEl.textContent = laps;
+    lapTimeEl.textContent = lapTime.toFixed(2);
+    if(!best || lapTime<best){ best=lapTime; bestEl.textContent = best.toFixed(2); }
+  }
+  if(distToLine>=8) crossed = false;
+
+  // HUD
+  vEl.textContent = Math.max(0, vel).toFixed(1);
+}
+
+// 摄像机跟随（平滑）
+const camTarget = new THREE.Vector3();
+function updateCamera(dt){
+  const behind = new THREE.Vector3(
+    Math.sin(steer),0, Math.cos(steer)
+  ).multiplyScalar(-10);
+  behind.y = 4.5;
+  camTarget.copy(car.position).add(behind);
+  camera.position.lerp(camTarget, 1 - Math.pow(0.001, dt)); // 指数平滑
+  camera.lookAt(car.position.x, car.position.y+1.2, car.position.z);
+}
+
+// 主循环
+let last = performance.now()/1000;
+function tick(){
+  const now = performance.now()/1000;
+  let dt = now - last; last = now;
+  if(dt>0.05) dt=0.05; // 防抖
+
+  if(!paused){
+    handleInput(dt);
+    updateCamera(dt);
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+tick();
+
+// 适配窗口
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// 开放一个观察模式（按 O）
+addEventListener('keydown', e=>{
+  if(e.code==='KeyO'){ orbit.enabled = !orbit.enabled; orbit.update(); }
+});
+</script>
+</body>
+</html>
