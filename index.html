@@ -1,213 +1,497 @@
 <!doctype html>
-<html lang="zh">
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>3D 卡丁车（CDN容错版）</title>
-<style>
-  html,body{margin:0;height:100%;overflow:hidden;background:#0b0e12;color:#e8f0f7;
-    font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans SC","PingFang SC","Hiragino Sans GB",Arial,sans-serif}
-  #hud{position:fixed;left:12px;top:12px;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.35);backdrop-filter:blur(4px);font-size:14px}
-  #err{position:fixed;left:12px;bottom:12px;max-width:min(92vw,640px);background:#271317;border:1px solid #6c2a36;color:#ffd9de;
-    padding:10px 12px;border-radius:10px;display:none;white-space:pre-wrap}
-  #help{position:fixed;right:12px;top:12px;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.35)}
-  .tag{display:inline-block;border:1px solid #2a3b5c;border-radius:999px;padding:2px 8px;margin-left:6px;font-size:12px;color:#9bd6ff}
-</style>
-<body>
-<div id="hud">速度 <span id="v">0</span> m/s<br>圈数 <span id="lap">0</span><span class="tag">起点=白线</span><br>本圈 <span id="lapTime">0.00</span>s　最佳 <span id="best">—</span></div>
-<div id="help">W/S 加速刹车　A/D 转向　空格手刹　R 重置　P 暂停</div>
-<div id="err"></div>
-
-<script type="module">
-const errBox = document.getElementById('err');
-async function loadThree() {
-  const bases = [
-    'https://cdn.jsdelivr.net/npm/three@0.160.0',
-    'https://unpkg.com/three@0.160.0',
-    'https://esm.sh/three@0.160.0'
-  ];
-  const logs = [];
-  for (const base of bases) {
-    try {
-      const THREE = await import(base + '/build/three.module.js');
-      const { OrbitControls } = await import(base + '/examples/jsm/controls/OrbitControls.js');
-      return { THREE, OrbitControls, used: base };
-    } catch(e) {
-      logs.push(`CDN 失败：${base}\n${e.message || e}`);
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>3D 卡丁车原型 - Three.js</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height: 100%; }
+    body { margin: 0; background: #0e0f12; overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", "PingFang SC", "Noto Sans CJK SC", "Hiragino Sans GB", Arial, "Microsoft YaHei", sans-serif; }
+    #hud {
+      position: fixed; left: 12px; top: 12px; z-index: 5; color: #e8ebf0; line-height: 1.45; 
+      background: rgba(0,0,0,0.35); backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px 12px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+      user-select: none; -webkit-user-select: none; touch-action: none;
     }
-  }
-  throw new Error('所有 CDN 加载失败。\n\n' + logs.join('\n\n'));
-}
+    #hud .title { font-weight: 700; letter-spacing: 0.02em; margin-bottom: 6px; opacity: .9; }
+    #hud .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    #hud .row .item { opacity: .92; }
+    #hud .row .val { font-variant-numeric: tabular-nums; font-weight: 600; color: #8ad4ff; }
 
-function showError(msg){
-  errBox.style.display='block';
-  errBox.textContent = '加载出错：\n' + msg + '\n\n建议：\n1) 刷新试试（Ctrl+F5）\n2) 换网络/开全局代理\n3) 稍后再试';
-}
+    #tips {
+      position: fixed; right: 12px; top: 12px; z-index: 5; color: #c9d2e0; opacity: .9;
+      background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 8px 10px; font-size: 12px;
+    }
 
-let THREE, OrbitControls;
-let scene, camera, renderer, car, walls, bar;
-let vel=0, sideVel=0, steer=0, paused=false;
-const keys={};
-addEventListener('keydown', e=>{ keys[e.code]=true; if(e.code==='KeyP') paused=!paused; if(e.code==='KeyR') resetCar(); });
-addEventListener('keyup',   e=>{ keys[e.code]=false; });
+    #pauseOverlay {
+      position: fixed; inset: 0; display: none; place-items: center; z-index: 6; 
+      background: radial-gradient(60% 60% at 50% 50%, rgba(0,0,0,.35), rgba(0,0,0,.65)); color: #fff; font-size: 22px; font-weight: 700;
+      text-shadow: 0 4px 22px rgba(0,0,0,.6);
+    }
 
-function resetCar(){
-  car.position.set(0,0.6,-105);
-  vel=0; sideVel=0; steer=0; car.rotation.y=0;
-}
+    #cdnError {
+      position: fixed; left: 12px; bottom: 12px; z-index: 7; max-width: min(92vw, 560px);
+      color: #ffb4b4; background: rgba(110, 0, 0, 0.5); border: 1px solid rgba(255,0,0,0.35); border-radius: 10px; padding: 10px 12px;
+      display: none; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+    }
 
-function setup(usedCdn){
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x10141b);
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div class="title">3D 卡丁车 原型</div>
+    <div class="row">
+      <div class="item">速度：<span class="val" id="hudSpeed">0.0</span> m/s</div>
+      <div class="item">圈数：<span class="val" id="hudLaps">0</span></div>
+      <div class="item">本圈：<span class="val" id="hudLap">00:00.000</span></div>
+      <div class="item">最佳：<span class="val" id="hudBest">—</span></div>
+    </div>
+  </div>
+  <div id="tips">
+    操作：W/S 加速/刹车，A/D 转向，空格 手刹，R 重置，P 暂停
+  </div>
+  <div id="pauseOverlay">已暂停（按 P 继续）</div>
+  <div id="cdnError"></div>
 
-  scene.add(new THREE.HemisphereLight(0x91a7ff, 0x1b2a1f, 0.8));
-  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
-  sun.position.set(100,120,80); sun.castShadow = true; scene.add(sun);
+  <script type="module">
+    const cdnErrorEl = document.getElementById('cdnError');
 
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(1000,1000),
-    new THREE.MeshStandardMaterial({color:0x1a222a}));
-  ground.rotation.x = -Math.PI/2; ground.receiveShadow = true; scene.add(ground);
-
-  const track = new THREE.Mesh(
-    new THREE.RingGeometry(70,120,64,1,0,Math.PI*2),
-    new THREE.MeshStandardMaterial({color:0x2a343f, side:THREE.DoubleSide})
-  );
-  track.rotation.x = -Math.PI/2; scene.add(track);
-
-  const startLine = new THREE.Mesh(new THREE.BoxGeometry(4,0.2,16),
-    new THREE.MeshStandardMaterial({color:0xffffff}));
-  startLine.position.set(0,0.11,-95); scene.add(startLine);
-
-  walls = new THREE.Group();
-  function addWall(x,z,w,d,rot=0){
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w,4,d),
-      new THREE.MeshStandardMaterial({color:0x37485a}));
-    m.position.set(x,2,z); m.rotation.y = rot; m.castShadow = true; m.receiveShadow = true;
-    walls.add(m);
-  }
-  for(let i=0;i<64;i++){
-    const t=i/64*Math.PI*2, R1=120,R2=70;
-    const x1=Math.cos(t)*R1, z1=Math.sin(t)*R1;
-    const x2=Math.cos(t)*R2, z2=Math.sin(t)*R2;
-    const seg=2.8, ang=Math.atan2(Math.sin(t),Math.cos(t));
-    addWall(x1,z1,seg,6,ang); addWall(x2,z2,seg,6,ang);
-  }
-  scene.add(walls);
-
-  car = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(4,1,6),
-    new THREE.MeshStandardMaterial({color:0x40d2a8, metalness:.1, roughness:.7}));
-  body.position.y=1.2; body.castShadow=true; car.add(body);
-  function wheel(x,z){
-    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.8,0.8,0.6,20),
-      new THREE.MeshStandardMaterial({color:0x222}));
-    w.rotation.z=Math.PI/2; w.position.set(x,0.6,z); w.castShadow=true; return w;
-  }
-  car.add(wheel( 1.6, 2.1)); car.add(wheel(-1.6, 2.1));
-  car.add(wheel( 1.6,-2.1)); car.add(wheel(-1.6,-2.1));
-  scene.add(car);
-  car.position.set(0,0.6,-105);
-
-  camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.1, 1000);
-  camera.position.set(0,5,-10);
-
-  renderer = new THREE.WebGLRenderer({antialias:true});
-  renderer.setSize(innerWidth, innerHeight);
-  renderer.shadowMap.enabled = true;
-  document.body.appendChild(renderer.domElement);
-
-  const orbit = new OrbitControls(camera, renderer.domElement);
-  orbit.enabled=false;
-
-  // HUD
-  const vEl = document.getElementById('v');
-  const lapEl = document.getElementById('lap');
-  const lapTimeEl = document.getElementById('lapTime');
-  const bestEl = document.getElementById('best');
-  let laps=0, lapStart=performance.now()/1000, best=null, crossed=false;
-
-  function handleInput(dt){
-    const accel = (keys['KeyW']||keys['ArrowUp'] ? 1:0) + (keys['KeyS']||keys['ArrowDown'] ? -1:0);
-    const turn  = (keys['KeyA']||keys['ArrowLeft'] ? 1:0) + (keys['KeyD']||keys['ArrowRight'] ? -1:0);
-    const handbrake = !!keys['Space'];
-
-    // 动力/阻力
-    if(accel>0) vel += 18*dt*accel; else if(accel<0) vel += 28*dt*accel;
-    vel *= (handbrake? 0.985: 0.994); vel = Math.max(Math.min(vel,42), -12);
-
-    const steerFactor = Math.max(0.2, 1.0 - Math.abs(vel)/50);
-    steer += (-turn) * 1.3 * steerFactor * dt; car.rotation.y = steer;
-
-    sideVel += (-turn) * Math.abs(vel)*0.06 * (handbrake? 1.8:0.8) * dt;
-    sideVel *= (handbrake? 0.92 : 0.94);
-
-    const forward = new THREE.Vector3(Math.sin(steer),0, Math.cos(steer));
-    const right   = new THREE.Vector3(Math.cos(steer),0,-Math.sin(steer));
-    const move = new THREE.Vector3().addScaledVector(forward, vel*dt).addScaledVector(right, sideVel*dt);
-    car.position.add(move);
-
-    // 碰墙
-    const carBox = new THREE.Box3().setFromObject(car).expandByScalar(-1.6);
-    for(const w of walls.children){
-      const box = new THREE.Box3().setFromObject(w);
-      if(box.intersectsBox(carBox)){
-        const normal = new THREE.Vector3().subVectors(car.position, w.position).setY(0).normalize();
-        car.position.addScaledVector(normal, 0.6);
-        vel *= 0.5; sideVel *= -0.3; break;
+    async function tryImport(url) {
+      try {
+        return await import(url);
+      } catch (e) {
+        return null;
       }
     }
 
-    // 计圈
-    const dist = car.position.distanceTo(new THREE.Vector3(0,0.6,-95));
-    if(dist<6 && vel>6 && !crossed){
-      crossed = true;
-      const now = performance.now()/1000;
-      const lapTime = now - lapStart; lapStart = now;
-      laps++; lapEl.textContent = laps; lapTimeEl.textContent = lapTime.toFixed(2);
-      if(!best || lapTime<best){ best=lapTime; bestEl.textContent = best.toFixed(2); }
+    async function loadThreeAndControls() {
+      const version = '0.161.0';
+      const sources = [
+        {
+          name: 'jsDelivr',
+          three: `https://cdn.jsdelivr.net/npm/three@${version}/build/three.module.js`,
+          controls: [
+            `https://cdn.jsdelivr.net/npm/three@${version}/examples/jsm/controls/OrbitControls.js`
+          ],
+        },
+        {
+          name: 'unpkg',
+          three: `https://unpkg.com/three@${version}/build/three.module.js`,
+          controls: [
+            `https://unpkg.com/three@${version}/examples/jsm/controls/OrbitControls.js`
+          ],
+        },
+        {
+          name: 'esm.sh',
+          three: `https://esm.sh/three@${version}`,
+          controls: [
+            `https://esm.sh/three@${version}/examples/jsm/controls/OrbitControls.js`,
+            `https://esm.sh/three@${version}/examples/jsm/controls/OrbitControls?deps=three@${version}`
+          ],
+        }
+      ];
+
+      let lastErr = '';
+      for (const src of sources) {
+        const threeMod = await tryImport(src.three);
+        if (threeMod) {
+          for (const ctrlUrl of src.controls) {
+            const controlsMod = await tryImport(ctrlUrl);
+            if (controlsMod && (controlsMod.OrbitControls || controlsMod.default)) {
+              return { THREE: threeMod, OrbitControls: controlsMod.OrbitControls || controlsMod.default, from: src.name };
+            }
+          }
+          // Even if OrbitControls failed, we can continue without it.
+          return { THREE: threeMod, OrbitControls: null, from: src.name };
+        }
+        lastErr = src.name;
+      }
+
+      throw new Error('CDN 加载失败（已尝试 jsDelivr / unpkg / esm.sh）');
     }
-    if(dist>=8) crossed=false;
 
-    vEl.textContent = Math.max(0, vel).toFixed(1);
-  }
+    function showCdnError(message) {
+      cdnErrorEl.style.display = 'block';
+      cdnErrorEl.innerHTML = `CDN 资源加载失败：${message}<br/>建议：刷新页面、切换网络或稍后再试。`;
+    }
 
-  const camTarget = new THREE.Vector3();
-  function updateCamera(dt){
-    const behind = new THREE.Vector3(Math.sin(steer),0, Math.cos(steer)).multiplyScalar(-10);
-    behind.y = 4.5;
-    camTarget.copy(car.position).add(behind);
-    camera.position.lerp(camTarget, 1 - Math.pow(0.001, dt));
-    camera.lookAt(car.position.x, car.position.y+1.2, car.position.z);
-  }
+    (async () => {
+      let THREE, OrbitControls;
+      try {
+        const res = await loadThreeAndControls();
+        THREE = res.THREE;
+        OrbitControls = res.OrbitControls; // 可选
+        console.log('Three.js 来源:', res.from);
+      } catch (e) {
+        console.error(e);
+        showCdnError(e.message || String(e));
+        return;
+      }
 
-  let last = performance.now()/1000;
-  function tick(){
-    const now = performance.now()/1000; let dt = now-last; last=now; if(dt>0.05) dt=0.05;
-    if(!paused){ handleInput(dt); updateCamera(dt); }
-    renderer.render(scene, camera);
-    requestAnimationFrame(tick);
-  }
-  tick();
+      // === Three.js 主逻辑 ===
+      const { Scene, PerspectiveCamera, WebGLRenderer, Color, Group, Vector3, Box3, Clock, AmbientLight, DirectionalLight, Mesh, MeshStandardMaterial, MeshBasicMaterial, PlaneGeometry, RingGeometry, BoxGeometry, CylinderGeometry, MathUtils, Quaternion, Fog } = THREE;
 
-  addEventListener('resize', ()=>{
-    camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
-    renderer.setSize(innerWidth, innerHeight);
-  });
+      const hudSpeed = document.getElementById('hudSpeed');
+      const hudLaps  = document.getElementById('hudLaps');
+      const hudLap   = document.getElementById('hudLap');
+      const hudBest  = document.getElementById('hudBest');
+      const pauseOverlay = document.getElementById('pauseOverlay');
 
-  // 小角标：当前使用的 CDN
-  const tag = document.createElement('div');
-  tag.style.cssText='position:fixed;right:12px;bottom:12px;font:12px/1 system-ui;color:#9bd6ff;opacity:.7';
-  tag.textContent='CDN: ' + usedCdn.replace(/^https:\/\/(www\.)?/,'');
-  document.body.appendChild(tag);
-}
+      const scene = new Scene();
+      scene.background = new Color(0x0b0c10);
+      scene.fog = new Fog(0x0b0c10, 100, 700);
 
-try{
-  const { THREE: T, OrbitControls: OC, used } = await loadThree();
-  THREE = T; OrbitControls = OC;
-  setup(used);
-}catch(e){
-  console.error(e);
-  showError(String(e.message || e));
-}
-</script>
+      const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1500);
+      camera.position.set(0, 12, 24);
+
+      const renderer = new WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // 灯光
+      scene.add(new AmbientLight(0xffffff, 0.45));
+      const sun = new DirectionalLight(0xffffff, 0.95);
+      sun.position.set(120, 200, 80);
+      sun.castShadow = true;
+      const s = 220;
+      sun.shadow.camera.left = -s; sun.shadow.camera.right = s; sun.shadow.camera.top = s; sun.shadow.camera.bottom = -s;
+      sun.shadow.mapSize.set(2048, 2048);
+      scene.add(sun);
+
+      // 地面
+      const ground = new Mesh(new PlaneGeometry(2000, 2000), new MeshStandardMaterial({ color: 0x101319, roughness: 1, metalness: 0 }));
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // 赛道参数（椭圆环）
+      const track = new Group();
+      scene.add(track);
+      const innerR = 70, outerR = 120;
+      const ellipseScaleX = 1.6; // 椭圆拉伸
+      const trackWidth = outerR - innerR; // 50
+      const wallHeight = 3.2;
+      const wallThickness = 1.6;
+
+      // Ring 表面
+      const ringGeo = new RingGeometry(innerR, outerR, 256, 1);
+      ringGeo.rotateX(-Math.PI / 2);
+      ringGeo.scale(ellipseScaleX, 1, 1);
+      const ringMat = new MeshStandardMaterial({ color: 0x1a1f29, roughness: 0.95, metalness: 0.0 });
+      const ring = new Mesh(ringGeo, ringMat);
+      ring.receiveShadow = true;
+      track.add(ring);
+
+      // 起点白线（横跨赛道）位于角度 t=0 附近（x>0 侧）
+      const startLineW = trackWidth * 0.9;
+      const startLine = new Mesh(new PlaneGeometry(startLineW, 2), new MeshBasicMaterial({ color: 0xffffff }));
+      startLine.rotation.x = -Math.PI / 2;
+      // 放在外半径与内半径中心线上，z≈0 横跨
+      startLine.position.set((innerR + trackWidth * 0.5) * ellipseScaleX, 0.01, 0);
+      track.add(startLine);
+
+      // 计算椭圆上点和切线
+      function ellipsePoint(a, b, t) { return new Vector3(a * Math.cos(t), 0, b * Math.sin(t)); }
+      function ellipseTangent(a, b, t) { return new Vector3(-a * Math.sin(t), 0, b * Math.cos(t)).normalize(); }
+      function ellipseNormalOut(a, b, t) { const n = new Vector3(a * Math.cos(t), 0, b * Math.sin(t)).normalize(); return n; }
+
+      // 墙体由一圈短 Box 组成
+      const innerWalls = [], outerWalls = [];
+      const innerBoxes = [], outerBoxes = [];
+      const innerNormals = [], outerNormals = [];
+
+      const segCount = 220;
+      for (let i = 0; i < segCount; i++) {
+        const t0 = (i / segCount) * Math.PI * 2;
+        const t1 = ((i + 1) / segCount) * Math.PI * 2;
+
+        // 内圈
+        const aIn = innerR * ellipseScaleX, bIn = innerR;
+        const p0 = ellipsePoint(aIn, bIn, t0);
+        const p1 = ellipsePoint(aIn, bIn, t1);
+        const segLenIn = p0.distanceTo(p1);
+        const tanIn = ellipseTangent(aIn, bIn, (t0 + t1) / 2);
+        const norIn = ellipseNormalOut(aIn, bIn, (t0 + t1) / 2); // 指向外（远离中心）
+
+        const boxIn = new Mesh(new BoxGeometry(segLenIn, wallHeight, wallThickness), new MeshStandardMaterial({ color: 0x262d3a, roughness: .9 }));
+        boxIn.castShadow = true; boxIn.receiveShadow = true;
+        // 中点
+        const midIn = p0.clone().add(p1).multiplyScalar(0.5);
+        boxIn.position.copy(midIn);
+        // 方向沿切线
+        const quatIn = new Quaternion().setFromUnitVectors(new Vector3(1,0,0), tanIn);
+        boxIn.setRotationFromQuaternion(quatIn);
+        track.add(boxIn);
+        innerWalls.push(boxIn);
+        innerNormals.push(norIn.clone());
+
+        // 外圈
+        const aOut = outerR * ellipseScaleX, bOut = outerR;
+        const q0 = ellipsePoint(aOut, bOut, t0);
+        const q1 = ellipsePoint(aOut, bOut, t1);
+        const segLenOut = q0.distanceTo(q1);
+        const tanOut = ellipseTangent(aOut, bOut, (t0 + t1) / 2);
+        const norOut = ellipseNormalOut(aOut, bOut, (t0 + t1) / 2).multiplyScalar(-1); // 指向内（朝中心）
+
+        const boxOut = new Mesh(new BoxGeometry(segLenOut, wallHeight, wallThickness), new MeshStandardMaterial({ color: 0x262d3a, roughness: .9 }));
+        boxOut.castShadow = true; boxOut.receiveShadow = true;
+        const midOut = q0.clone().add(q1).multiplyScalar(0.5);
+        boxOut.position.copy(midOut);
+        const quatOut = new Quaternion().setFromUnitVectors(new Vector3(1,0,0), tanOut);
+        boxOut.setRotationFromQuaternion(quatOut);
+        track.add(boxOut);
+        outerWalls.push(boxOut);
+        outerNormals.push(norOut.clone());
+      }
+
+      // 静态 Box3（世界坐标）
+      const tmpBox = new Box3();
+      const innerWallBoxes = innerWalls.map(w => new Box3().setFromObject(w));
+      const outerWallBoxes = outerWalls.map(w => new Box3().setFromObject(w));
+
+      // 起点检测盒
+      const startBox = new Box3();
+      {
+        const w = startLineW, h = 4, d = 6;
+        // 围绕 startLine 的 AABB
+        const min = startLine.position.clone().add(new Vector3(-w/2, -0.5, -d/2));
+        const max = startLine.position.clone().add(new Vector3( w/2,  h/2,  d/2));
+        startBox.min.copy(min); startBox.max.copy(max);
+      }
+
+      // 车辆
+      const kart = new Group();
+      scene.add(kart);
+      const carWidth = 2.0, carHeight = 1.0, carLength = 4.0;
+      const body = new Mesh(new BoxGeometry(carLength, carHeight, carWidth), new MeshStandardMaterial({ color: 0x2ec4b6, roughness: .6 }));
+      body.castShadow = true; body.receiveShadow = true;
+      body.position.y = carHeight / 2;
+      kart.add(body);
+      // 轮子（简单方块）
+      const wheelMat = new MeshStandardMaterial({ color: 0x0f141a, roughness: .9 });
+      const wheelGeo = new BoxGeometry(0.8, 0.8, 0.5);
+      function makeWheel(x, z) {
+        const w = new Mesh(wheelGeo, wheelMat); w.castShadow = true; w.receiveShadow = true; w.position.set(x, 0.4, z); return w;
+      }
+      const wFL = makeWheel( carLength/2 - 0.6,  carWidth/2 + 0.1);
+      const wFR = makeWheel( carLength/2 - 0.6, -carWidth/2 - 0.1);
+      const wRL = makeWheel(-carLength/2 + 0.6,  carWidth/2 + 0.1);
+      const wRR = makeWheel(-carLength/2 + 0.6, -carWidth/2 - 0.1);
+      kart.add(wFL, wFR, wRL, wRR);
+
+      // 初始位置：起点线前方
+      kart.position.copy(startLine.position.clone().add(new Vector3(-8, 0, 0)));
+      let heading = 0; // 朝 +X 方向
+
+      // 物理与控制
+      const keys = new Set();
+      let paused = false;
+      let velocity = new Vector3();
+      const clock = new Clock();
+
+      const maxSpeed = 65; // m/s（~234 km/h）
+      const engineAccel = 28; // 油门加速度
+      const brakeAccel = 38; // 刹车减速度
+      const baseFriction = 0.8; // 线性阻力（越大减速越快）
+      const airDrag = 0.015; // 空气阻力系数
+      const steerSensitivity = 1.6; // 转向灵敏（影响角速度）
+      const lateralGrip = 7.5; // 侧向抓地（越大越不漂）
+      const handbrakeGrip = 2.3; // 手刹时的侧向抓地（更滑）
+      const restitution = 0.15; // 撞墙反弹系数
+      const wallDamping = 0.45; // 撞墙速度衰减
+
+      // 计圈
+      let laps = 0;
+      let currentLapStart = performance.now();
+      let bestLapMs = Infinity;
+      let lastCrossAt = 0;
+
+      function msToClock(ms) {
+        if (!isFinite(ms)) return '—';
+        const t = Math.max(0, ms);
+        const m = Math.floor(t / 60000);
+        const s = Math.floor((t % 60000) / 1000);
+        const ms3 = Math.floor(t % 1000).toString().padStart(3, '0');
+        return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${ms3}`;
+      }
+
+      function updateHUD(now) {
+        hudSpeed.textContent = velocity.length().toFixed(1);
+        hudLaps.textContent = String(laps);
+        hudLap.textContent = msToClock(now - currentLapStart);
+        hudBest.textContent = msToClock(bestLapMs);
+      }
+
+      // 事件
+      window.addEventListener('keydown', (e) => {
+        if (e.repeat) return;
+        if (e.code === 'KeyP') { paused = !paused; pauseOverlay.style.display = paused ? 'grid' : 'none'; return; }
+        if (e.code === 'KeyR') { resetKart(); return; }
+        keys.add(e.code);
+        if (e.code === 'Space') e.preventDefault();
+      });
+      window.addEventListener('keyup', (e) => {
+        keys.delete(e.code);
+      });
+
+      function resetKart() {
+        velocity.set(0,0,0);
+        heading = 0;
+        kart.position.copy(startLine.position.clone().add(new Vector3(-8, 0, 0)));
+        kart.rotation.set(0,0,0);
+      }
+
+      // 使用 OrbitControls（可选：URL 加 ?orbit）
+      const useOrbit = new URLSearchParams(location.search).has('orbit');
+      let orbit;
+      if (useOrbit && OrbitControls) {
+        orbit = new OrbitControls(camera, renderer.domElement);
+        orbit.enableDamping = true;
+        orbit.target.copy(kart.position);
+        orbit.maxPolarAngle = Math.PI * 0.499;
+      }
+
+      function getForwardVector() {
+        return new Vector3(Math.cos(heading), 0, Math.sin(heading));
+      }
+      function getRightVector() {
+        return new Vector3(-Math.sin(heading), 0, Math.cos(heading));
+      }
+
+      // 相机平滑跟随
+      const camOffset = new Vector3(-12, 7, 0); // 在车后左侧一点（随后根据朝向旋转）
+      const camLookAhead = 10;
+
+      function updateCamera(dt) {
+        const forward = getForwardVector();
+        const back = forward.clone().multiplyScalar(-1);
+        const right = getRightVector();
+        const up = new Vector3(0,1,0);
+
+        // 将 camOffset 旋转到车辆朝向的坐标系
+        const desiredPos = kart.position.clone()
+          .add(back.multiplyScalar(14))
+          .add(up.multiplyScalar(7))
+          .add(right.multiplyScalar(2.5));
+
+        camera.position.lerp(desiredPos, 1 - Math.exp(-6 * dt)); // 指数平滑
+
+        const lookTarget = kart.position.clone().add(forward.clone().multiplyScalar(camLookAhead));
+        camera.lookAt(lookTarget);
+
+        if (orbit) {
+          orbit.target.copy(kart.position);
+          orbit.update();
+        }
+      }
+
+      // 撞墙检测
+      const carBox = new Box3();
+      function updateCarBox() { carBox.setFromObject(kart); }
+
+      function resolveCollisionWithWall(wallBoxes, wallNormals) {
+        for (let i=0; i<wallBoxes.length; i++) {
+          if (carBox.intersectsBox(wallBoxes[i])) {
+            const n = wallNormals[i];
+            // 简单沿法线推开
+            kart.position.add(n.clone().multiplyScalar(0.5));
+            // 速度分解，反射并衰减
+            const vn = n.clone().multiplyScalar(velocity.dot(n));
+            const vt = velocity.clone().sub(vn);
+            velocity.copy(vt.add(vn.multiplyScalar(-restitution))).multiplyScalar(1 - wallDamping);
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function maybeLap(now) {
+        // 条件：进入 startBox，速度>一定阈值，且距上次触发>2s
+        if (now - lastCrossAt < 2000) return;
+        if (velocity.length() < 6) return;
+        if (carBox.intersectsBox(startBox)) {
+          lastCrossAt = now;
+          // 完成一圈
+          const lapMs = now - currentLapStart;
+          if (lapMs > 5000) { // 忽略过短无效圈
+            laps += 1;
+            bestLapMs = Math.min(bestLapMs, lapMs);
+          }
+          currentLapStart = now;
+        }
+      }
+
+      function integrate(dt) {
+        // 控制输入
+        const forward = getForwardVector();
+        const right = getRightVector();
+
+        let accel = 0;
+        if (keys.has('KeyW') || keys.has('ArrowUp')) accel += engineAccel;
+        if (keys.has('KeyS') || keys.has('ArrowDown')) accel -= brakeAccel; // 简化：反向
+
+        const handbrake = keys.has('Space');
+        const grip = handbrake ? handbrakeGrip : lateralGrip;
+
+        // 转向产生角速度（与前进速度相关）
+        let steer = 0;
+        if (keys.has('KeyA') || keys.has('ArrowLeft')) steer += 1;
+        if (keys.has('KeyD') || keys.has('ArrowRight')) steer -= 1;
+        const speedAlongForward = velocity.dot(forward);
+        heading += steer * steerSensitivity * MathUtils.clamp(speedAlongForward / 30, -1, 1) * dt;
+
+        // 沿车头方向加速/减速
+        velocity.add(forward.multiplyScalar(accel * dt));
+
+        // 分解速度，衰减侧滑以产生抓地/漂移感
+        const vForward = forward.multiplyScalar(velocity.dot(forward));
+        const vSide = right.multiplyScalar(velocity.dot(right));
+        const sideDamp = Math.exp(-grip * dt);
+        const forwardDamp = Math.exp(-(baseFriction + airDrag * velocity.length()) * dt);
+        velocity.copy(vForward.multiplyScalar(forwardDamp).add(vSide.multiplyScalar(sideDamp)));
+
+        // 速度上限
+        if (velocity.length() > maxSpeed) {
+          velocity.setLength(maxSpeed);
+        }
+
+        // 积分位置
+        kart.position.add(velocity.clone().multiplyScalar(dt));
+
+        // 车体朝向
+        kart.rotation.y = heading;
+      }
+
+      // 帧循环
+      function animate() {
+        const dt = Math.min(0.033, clock.getDelta());
+        const now = performance.now();
+        if (!paused) {
+          integrate(dt);
+          updateCarBox();
+          // 撞墙处理（优先检测内外墙）
+          resolveCollisionWithWall(innerWallBoxes, innerNormals) || resolveCollisionWithWall(outerWallBoxes, outerNormals);
+          maybeLap(now);
+        }
+        updateCamera(dt);
+        updateHUD(now);
+        renderer.render(scene, camera);
+        requestAnimationFrame(animate);
+      }
+
+      // 适配尺寸
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      animate();
+    })();
+  </script>
 </body>
 </html>
